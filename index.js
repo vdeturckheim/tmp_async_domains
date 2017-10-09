@@ -1,9 +1,11 @@
 'use strict';
 const async_hooks = require('async_hooks');
+require('domain')
 const events = require('events');
 
 process.domain = null;
-class Domain extends events{
+
+class Domain extends events {
 
     static create() {
 
@@ -25,7 +27,7 @@ class Domain extends events{
         this.asyncHook = async_hooks.createHook({
             init(asyncId, type, triggerAsyncId) {
 
-                if (self.ids.has(triggerAsyncId)) { // if parent is in the domain, the child has to be too.
+                if (self.ids.has(triggerAsyncId) || process.domain === this) { // if parent is in the domain, the child has to be too.
                     self.ids.add(asyncId);
                 }
             },
@@ -55,11 +57,9 @@ class Domain extends events{
 
     run(cb) {
 
-        process.nextTick(() => {
-
-            this.ids.add(async_hooks.executionAsyncId());
-            cb();
-        });
+        this.enter();
+        cb();
+        this.exit();
     }
 
     enter() {
@@ -75,12 +75,9 @@ class Domain extends events{
         const self = this;
         return function () {
 
-            self.run(() => {
-
-                self.enter();
-                cb.apply(this, arguments);
-                self.exit();
-            });
+            self.enter();
+            cb.apply(this, arguments);
+            self.exit();
         }
     }
 
@@ -110,7 +107,8 @@ process.on('uncaughtException', (err) => {
     throw err;
 });
 
-setInterval(() => {}, 100000);
+setInterval(() => {
+}, 100000);
 
 const domain = Domain.create();
 const domain2 = Domain.create();
@@ -182,8 +180,9 @@ const main = async () => {
     }
 }
 
+
 domain2.run(() => {
 
     main();
-})
+});
 
