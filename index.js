@@ -1,11 +1,54 @@
 'use strict';
 const async_hooks = require('async_hooks');
-require('domain')
-const events = require('events');
+const EventEmitter = require('events');
+const util = require('util');
 
 process.domain = null;
+const stack = []; // TODO
+function bound(_this, self, cb, fnargs) {
 
-class Domain extends events {
+    let ret;
+
+    self.enter();
+    if (fnargs.length > 0)
+        ret = cb.apply(_this, fnargs);
+    else
+        ret = cb.call(_this);
+    self.exit();
+
+    return ret;
+}
+
+function intercepted(_this, self, cb, fnargs) {
+
+    if (fnargs[0] && fnargs[0] instanceof Error) {
+        const er = fnargs[0];
+        util._extend(er, {
+            domainBound: cb,
+            domainThrown: false,
+            domain: self
+        });
+        self.emit('error', er);
+        return;
+    }
+
+    const args = [];
+    let i, ret;
+
+    self.enter();
+    if (fnargs.length > 1) {
+        for (i = 1; i < fnargs.length; i++)
+            args.push(fnargs[i]);
+        ret = cb.apply(_this, args);
+    } else {
+        ret = cb.call(_this);
+    }
+    self.exit();
+
+    return ret;
+}
+
+class Domain extends EventEmitter {
 
     static create() {
 
@@ -16,8 +59,8 @@ class Domain extends events {
 
     constructor() {
         super();
-
         this.ids = new Set();
+        this.members = new Set();
     }
 
 
@@ -25,9 +68,9 @@ class Domain extends events {
 
         const self = this;
         this.asyncHook = async_hooks.createHook({
-            init(asyncId, type, triggerAsyncId) {
+            init(asyncId) {
 
-                if (self.ids.has(triggerAsyncId) || process.domain === this) { // if parent is in the domain, the child has to be too.
+                if (process.domain === self) { // if this operation is created while in a domain, let's mark it
                     self.ids.add(asyncId);
                 }
             },
@@ -45,10 +88,7 @@ class Domain extends events {
             },
             destroy(asyncId) {
 
-                self.ids.delete(asyncId);
-            },
-            promiseResolve(asyncId) {
-
+                self.ids.delete(asyncId); // cleaning up
             }
         });
 
@@ -73,28 +113,59 @@ class Domain extends events {
     bind(cb) {
 
         const self = this;
-        return function () {
 
-            self.enter();
-            cb.apply(this, arguments);
-            self.exit();
+        function runBound() {
+            return bound(this, self, cb, arguments);
         }
+
+        runBound.domain = this;
+
+        return runBound;
     }
 
     intercept(cb) {
 
-        throw new Error('not implemented yet');
+        var self = this;
+
+        function runIntercepted() {
+            return intercepted(this, self, cb, arguments);
+        }
+
+        return runIntercepted;
     }
 
-    add(emitter) {
+    add(ee) {
+        // If the domain is already added, then nothing left to do.
+        if (ee.domain === this)
+            return;
 
-        throw new Error('not implemented yet');
-    }
+        // has a domain already - remove it first.
+        if (ee.domain)
+            ee.domain.remove(ee);
 
-    remove(emitter) {
+        // check for circular Domain->Domain links.
+        // This causes bad insanity!
+        //
+        // For example:
+        // var d = domain.create();
+        // var e = domain.create();
+        // d.add(e);
+        // e.add(d);
+        // e.emit('error', er); // RangeError, stack overflow!
+        if (this.domain && (ee instanceof Domain)) {
+            for (let d = this.domain; d; d = d.domain) {
+                if (ee === d) return;
+            }
+        }
 
-        throw new Error('not implemented yet');
-    }
+        ee.domain = this;
+        this.members.add(ee);
+    };
+
+    remove(ee) {
+        ee.domain = null;
+        this.members.delete(ee);
+    };
 }
 
 process.on('uncaughtException', (err) => {
@@ -107,8 +178,7 @@ process.on('uncaughtException', (err) => {
     throw err;
 });
 
-setInterval(() => {
-}, 100000);
+setInterval(() => {}, 100000);
 
 const domain = Domain.create();
 const domain2 = Domain.create();
@@ -180,9 +250,8 @@ const main = async () => {
     }
 }
 
-
 domain2.run(() => {
 
     main();
-});
+})
 
